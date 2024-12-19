@@ -1,0 +1,1703 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r packages}
+library(here)
+library(tidyverse)
+library(readxl)
+library(psych)
+library(tidyLPA)
+library(mclust)
+library(lubridate)
+library(dbscan)
+library(umap)
+library(GGally)
+library(ggalluvial)
+
+ci <- function(x){
+  abs(qt(0.025,length(x)-1)*(sd(x,na.rm=T)/(sqrt(length(x)))))
+}
+
+```
+
+### Load and clean data
+99 is NA code.
+```{r}
+df <- read_excel(here("Data","hormones_data.xlsx"), na = "99")
+df$like_E2 <- as.numeric(df$like_E2)
+```
+invert reversed item, items have a likert scale ranging from 1-5
+
+```{r}
+items_invert <- colnames(df)[grep("-R",colnames(df))]
+
+df[items_invert][df[items_invert] == 1] <- 5
+df[items_invert][df[items_invert] == 2] <- 4
+df[items_invert][df[items_invert] == 4] <- 2
+df[items_invert][df[items_invert] == 5] <- 1
+
+```
+
+Remove kids with disorder
+```{r}
+
+disorder <- c("Y122", "Y169", "Y105", "Y128",
+              "Y153", "Y155", "Y156", "Y160",
+              "Y163", "Y190", "Y180")
+
+df$disorder <- ifelse(df$ID %in% disorder,1,0)
+
+df %>% ggplot(aes(y = Test, x = as.factor(disorder), color = ID)) + geom_jitter() +
+  theme(legend.position = "none")
+
+t.test(Test ~ as.factor(disorder), data = df, var.equal = F)
+
+df <-  df %>% filter(!ID %in% disorder)
+
+```
+
+
+
+### prepare constructs
+Building variables that store all items that belong to a specific construct
+"-R" coded item are reverse but already entered correctly, i.e., no need to recode anything.
+```{r}
+school_performance <- colnames(df)[grep("SP[1-9]",colnames(df))]  
+teacher_mastery <- colnames(df)[grep("TM[1-9]",colnames(df))] 
+personal_performance <- colnames(df)[grep("PP[1-9]",colnames(df))] 
+personal_performance_english <- colnames(df)[grep("PPE[1-9]",colnames(df))]
+personal_performance_language <- colnames(df)[grep("PPL[1-9]",colnames(df))]
+teacher_performance_avoidance <- colnames(df)[grep("TPA[1-9]",colnames(df))]
+parents_performance <- colnames(df)[grep("TPA[1-9]",colnames(df))]
+parents_mastery <- colnames(df)[grep("PaM[1-9]",colnames(df))]
+teacher_performance <- colnames(df)[grep("TP[1-9]",colnames(df))]
+personal_performance_avoidance <- colnames(df)[grep("PPA[1-9]",colnames(df))]
+peers_mastery <- colnames(df)[grep("PeM[1-9]",colnames(df))]
+peers_performance <- colnames(df)[grep("PeP[1-9]",colnames(df))]
+self_efficacy <- colnames(df)[grep("SE[1-9]",colnames(df))]
+self_efficacy_english <- colnames(df)[grep("SEE[1-9]",colnames(df))]
+self_efficacy_language <- colnames(df)[grep("SEL[1-9]",colnames(df))]
+interest <- colnames(df)[grep("I[1-9]",colnames(df))]
+continuous_motivation <- colnames(df)[grep("CM[1-9]",colnames(df))]
+personal_mastery <- colnames(df)[grep("PM[1-9]",colnames(df))]
+personal_mastery_english <- colnames(df)[grep("PME[1-9]",colnames(df))]
+personal_mastery_language <- colnames(df)[grep("PML[1-9]",colnames(df))]
+school_mastery <- colnames(df)[grep("SM[1-9]",colnames(df))]
+peers_performance_avoidance <- colnames(df)[grep("PePA[1-9]",colnames(df))]
+
+df$druze <- ifelse(df$school %in% c("A", "B", "C", "D", "E"), 1, 0)
+
+constructs <- c("school_performance","teacher_mastery","personal_performance","personal_performance_english","personal_performance_language", "teacher_performance_avoidance", "parents_performance","teacher_performance", "personal_performance_avoidance", "peers_mastery", "self_efficacy", "self_efficacy_english", "self_efficacy_language", "interest", "continuous_motivation", "personal_mastery", "personal_mastery_english", "personal_mastery_language", "school_mastery", "peers_performance_avoidance")
+```
+ 
+#### Build E2 Variable
+For E2, we assume that either it is there or not -> turn it into a binary variable. This includes that if it has been detected at T1, it is also assumed present at T2.
+
+```{r}
+# is E2 is "NA" set to 0 (NA code for E2 means not detected), if E2 =0, set to 0, otheweise set to 1
+df$E2_binary <- ifelse(is.na(df$E2) == T, 0, ifelse(df$E2 == 0, 0, 1))
+
+# check
+table(df[,c("E2_binary","time")])
+
+#buidl variable with all students where E2 present at time 1
+ID_E2_present <- df %>% filter(time == 1 & E2_binary == 1) %>% select(ID)
+
+# set E2_binary also to 1 for every student at time 2 where it was present at time 1
+df[df$ID %in% ID_E2_present$ID & df$time == 2,"E2_binary"] <- 1
+
+# check
+table(df[,c("E2_binary","time")])
+
+```
+# Preprocessing
+```{r}
+#create a new variable for age at the time of testing
+df$start <- ymd(df$DoB)
+df$end <- ymd(df$date)
+df$age <- df$end - df$start
+df$age <- df$age / dyears(1)
+
+# create log versions of hormons data
+
+df$DHEAS_log <- log(df$DHEAS)
+df$Test_log <- log(df$Test)
+df$like_E2_log <- log(df$like_E2)
+
+# calculate scales
+# mastery
+df$mastery_peers <- rowMeans(df[peers_mastery], na.rm = T)
+df$mastery_pers <- rowMeans(df[personal_mastery], na.rm = T)
+df$mastery_school <- rowMeans(df[school_mastery], na.rm = T)
+df$mastery_teacher <- rowMeans(df[teacher_mastery], na.rm = T)
+df$mastery_sc <- rowMeans(df[c(teacher_mastery, school_mastery)], na.rm = T)
+df$mastery_parents <- rowMeans(df[parents_mastery], na.rm = T)
+
+# performance approach
+df$performance_peers <- rowMeans(df[peers_performance], na.rm = T)
+df$performance_pers <- rowMeans(df[personal_performance], na.rm = T)
+df$perf_school <- rowMeans(df[school_performance], na.rm = T)
+df$perf_teacher <- rowMeans(df[teacher_performance], na.rm = T)
+df$perf_sc <- rowMeans(df[c(teacher_performance,school_performance)], na.rm = T)
+df$perf_parents <- rowMeans(df[parents_performance], na.rm = T)
+
+# performance avoidance
+df$perf_av_pers <- rowMeans(df[personal_performance_avoidance], na.rm = T)
+df$perf_av_peers <- as.numeric(df$`PePA1-R`)
+df$perf_av_sc <- rowMeans(df[teacher_performance_avoidance], na.rm = T)
+
+df$perf_av_peers[is.nan(df$perf_av_peers) == T] <- "NA"
+
+df$se <- rowMeans(df[self_efficacy], na.rm = T)
+df$perf_pers <- df$performance_pers
+df$perfA_pers <- df$performance_avoid_pers
+df$perf_av_peers <- df$performance_avoid_peers
+
+#
+#df$pa_peers <- df$performance_peers
+#
+#df$mastery_diff_peer <- abs(df$mastery_pers - df$ma_peers)
+#df$perf_diff_peer <- abs(df$performance_pers - df$performance_peers)
+#df$perfA_diff <- abs(df$perfA_pers - df$perf_av_peers)
+#
+
+df$mastery_diff_school <- abs(df$mastery_pers - df$mastery_school)
+df$perf_diff_school <- abs(df$performance_pers - df$perf_school)
+
+df$mastery_diff_teacher <- abs(df$mastery_pers - df$mastery_teacher)
+df$perf_diff_teacher <- abs(df$performance_pers - df$perf_teacher)
+
+df$mastery_diff_sc <- rowMeans(df[c("mastery_diff_teacher","mastery_diff_school")], na.rm = T)
+df$perf_diff_sc <- rowMeans(df[c("perf_diff_teacher","perf_diff_school")], na.rm = T)
+
+df$mastery_diff_parents <- abs(df$mastery_pers - df$mastery_parents)
+df$perf_diff_parents <- abs(df$performance_pers - df$perf_parents)  
+
+
+# renamed variables for mplus
+df$ma_peers <- df$mastery_peers
+df$ma_pers <- df$mastery_pers
+df$ma_sc <- df$mastery_sc
+df$ma_par <- df$mastery_parents
+
+df$per_peers <- df$performance_peers
+df$per_pers <- df$performance_pers
+df$per_sc <- df$perf_sc
+df$per_par <- df$perf_parents
+
+
+```
+
+# hormones
+```{r}
+plot(df$Test)
+
+plot(df$like_E2)
+
+hist(df$like_E2)
+
+plot(log(df$DHEAS))
+
+df_ana  <- df[df$DHEAS < 15000,]
+
+df_ana2  <- df_ana[df_ana$like_E2 < 2,]
+
+df_ana <- df_ana[complete.cases(df_ana[c("Test","like_E2","DHEAS")]),]
+
+plot(df_ana$DHEAS)
+plot(df_ana$like_E2)
+plot(df_ana$Test)
+
+```
+
+
+
+# look at kids that have two data points
+```{r}
+df_ana_1 <- df_ana %>% filter(time == 1) %>% select("ID", "Gender", "like_E2", "DHEAS", "Test")
+df_ana_2 <- df_ana %>% filter(time == 2) %>% select("ID", "like_E2", "DHEAS", "Test")
+
+df_ana_wide <- left_join(df_ana_1, df_ana_2, by = "ID")
+
+df_ana_wide <- df_ana_wide[complete.cases(df_ana_wide),]
+
+df_ana_time_long <- df_ana_wide %>% pivot_longer(-c("ID","Gender") ,names_to = c("construct","time"), values_to = "value", names_sep = "\\.")
+
+df_ana_time_long$time_num <- ifelse(df_ana_time_long$time == "x",0,1)
+
+#### plots 
+dheas_long_plot <- df_ana_time_long %>% group_by(construct, time_num, Gender) %>% 
+  summarize(mean = mean(value),
+            ci = ci(value)) %>% 
+ filter(construct == "DHEAS") %>% ggplot(aes(y = mean, x = time_num, ymin = mean-ci, max = mean+ci)) + geom_point() + geom_linerange() + geom_smooth(method = "lm") + facet_wrap(.~Gender) + scale_x_continuous(breaks = c(0,1), labels = c(1,2), name = "Measurement Timepoint") + ylab("DHEAS in pg/ml") + theme(text = element_text(size = 16))
+
+# ggsave(here("Output","Final Plots","dheas_two_data_points.pdf"), plot = dheas_long_plot, device = "pdf", width = 6, height = 4)
+
+test_long_plot <- df_ana_time_long %>% group_by(construct, time_num, Gender) %>% 
+  summarize(mean = mean(value),
+            ci = ci(value)) %>% 
+ filter(construct == "Test") %>% ggplot(aes(y = mean, x = time_num, ymin = mean-ci, max = mean+ci)) + geom_point() + geom_linerange() + geom_smooth(method = "lm") + facet_wrap(.~Gender) + scale_x_continuous(breaks = c(0,1), labels = c(1,2), name = "Measurement Timepoint") + ylab("Testosterone in pg/ml") + theme(text = element_text(size = 16))
+
+# ggsave(here("Output","Final Plots","test_two_data_points.pdf"), plot = test_long_plot, device = "pdf", width = 6, height = 4)
+
+estro_long_plot <- df_ana_time_long %>% group_by(construct, time_num, Gender) %>% 
+  summarize(mean = mean(value),
+            ci = ci(value)) %>% 
+ filter(construct == "like_E2") %>% ggplot(aes(y = mean, x = time_num, ymin = mean-ci, max = mean+ci)) + geom_point() + geom_linerange() + geom_smooth(method = "lm") + facet_wrap(.~Gender) + scale_x_continuous(breaks = c(0,1), labels = c(1,2), name = "Measurement Timepoint") + ylab("Estrogen in pg/ml") + theme(text = element_text(size = 16))
+
+#ggsave(here("Output","Final Plots","estro_two_data_points.pdf"), plot = estro_long_plot, device = "pdf", width = 6, height = 4)
+
+df_ana_time_long %>% filter(construct == "like_E2" & Gender == "girl") %>% 
+  t.test(value ~ time, paired = T, data = .)
+
+
+df_ana_time_long %>% 
+ filter(construct == "like_E2") %>% ggplot(aes(y = value, x = time_num)) + geom_point() + facet_wrap(.~Gender) + geom_smooth()
+
+df_ana_time_long %>% filter(construct == "Test") %>% ggplot(aes(y = value, x = time_num)) + geom_point() +  geom_smooth(method = "lm") 
+
+df_ana_time_long %>% filter(construct == "like_E2") %>% ggplot(aes(y = value, x = time_num)) + geom_point() +  geom_smooth(method = "lm") 
+```
+
+
+
+# hormones over time
+```{r}
+library(corrr)
+
+df_ana %>% 
+  ggplot(aes(y = Test, x = age, colour = as.factor(druze))) + geom_point() + geom_smooth(method = "lm") +
+  facet_wrap(Gender~.) + 
+  scale_color_discrete(name = "Druze")
+
+df_ana %>% 
+  ggplot(aes(y = DHEAS, x = age, colour = as.factor(druze))) + geom_point() + geom_smooth(method = "lm") +
+  facet_wrap(Gender~.) + 
+  scale_color_discrete(name = "Druze")
+  
+df_ana %>% 
+  ggplot(aes(y = like_E2, x = age, colour = as.factor(druze))) + geom_point() + geom_smooth(method = "lm") +
+  facet_wrap(Gender~.) + 
+  scale_color_discrete(name = "Druze")
+
+df_ana %>% filter(like_E2 < 1.25) %>% 
+  ggplot(aes(y = like_E2, x = age, colour = as.factor(druze))) + geom_point() + geom_smooth(method = "lm") +
+  facet_wrap(Gender~.) + 
+  scale_color_discrete(name = "Druze")
+  
+
+df_ana %>% 
+  ggplot(aes(y = Test, x = Gender, colour = as.factor(druze))) + geom_boxplot() +
+  facet_wrap(school_type~.) + 
+  scale_color_discrete(name = "Druze")
+
+
+df_ana %>% 
+  ggplot(aes(y = DHEAS, x = Gender, colour = as.factor(druze))) + geom_boxplot() +
+  facet_wrap(school_type~.) + 
+  scale_color_discrete(name = "Druze")
+
+df_ana %>% 
+  ggplot(aes(y = like_E2, x = Gender, colour = as.factor(druze))) + geom_boxplot() +
+  facet_wrap(school_type~.) + 
+  scale_color_discrete(name = "Druze")
+
+```
+
+# correlations between motivational constructs, jews, first elementary, then HS
+```{r} 
+library(ggcorrplot)
+
+
+motivation <- c("mastery_peers", "mastery_pers", "mastery_sc", "mastery_parents",
+                "performance_peers", "performance_pers", "perf_sc", "perf_parents")
+
+jew_corr_elem <-  round(cor(df[df$druze == 0 & df$school_type == "elementary", motivation]), 2)
+jew_corr_p_elem <- cor_pmat(df[df$druze == 0 & df$school_type == "elementary", motivation])
+
+ggcorrplot(jew_corr_elem, lab = T, p.mat = jew_corr_p_elem, insig = "blank", type = "lower")
+
+
+jew_corr <-  round(cor(df[df$druze == 0 & df$school_type == "middle School", motivation]), 2)
+jew_corr_p <- cor_pmat(df[df$druze == 0 & df$school_type == "middle School", motivation])
+
+ggcorrplot(jew_corr, lab = T, p.mat = jew_corr_p, insig = "blank", type = "lower")
+
+```
+
+# correlations between motivational constructs, druze
+```{r} 
+library(ggcorrplot)
+
+
+druze_corr_elem <-  round(cor(df[df$druze == 1 & df$school_type == "elementary", motivation]), 2)
+druze_corr_p_elem <- cor_pmat(df[df$druze == 1 & df$school_type == "elementary", motivation])
+
+ggcorrplot(druze_corr_elem, lab = T, p.mat = druze_corr_p_elem, insig = "blank", type = "lower")
+
+druze_corr<-  round(cor(df[df$druze == 1 & df$school_type == "middle School", motivation]), 2)
+druze_corr_p <- cor_pmat(df[df$druze == 1 & df$school_type == "middle School", motivation])
+
+ggcorrplot(druze_corr, lab = T, p.mat = druze_corr_p, insig = "blank", type = "lower")
+
+```
+
+#LPA elementary
+```{r}
+#Profiles for all students, elementary only.
+
+profile_constucts2 <- c("ma_pers", "ma_peers", "ma_sc", "ma_par",
+                        "per_pers", "per_peers", "per_sc", "per_par")
+df_ana$E2_bin <- df_ana$E2_binary
+df_profiles2 <- df_ana[complete.cases(df_ana[,profile_constucts2]),]
+
+df_profiles2 %>% filter(school_type == "elementary") %>% select(all_of(c(profile_constucts2,"Test","DHEAS"))) %>% ggpairs()
+
+
+df_profiles_elem <- df_profiles2 %>% filter(school_type == "elementary") %>% select(all_of(c(profile_constucts2,"Gender","Test","DHEAS","like_E2","E2","E2_bin")))
+
+
+
+write.table(df_profiles_elem, "df_prof_el_E2.dat", sep = "\t", na = "-999", row.names = FALSE, col.names = FALSE)
+
+df_profiles_ms <- df_profiles2 %>% filter(!school_type == "elementary") %>% select(all_of(c(profile_constucts2,"Gender","Test","DHEAS","E2","E2_bin")))
+
+write.table(df_profiles_ms, "df_prof_ms_E2.dat", sep = "\t", na = "-999", row.names = FALSE, col.names = FALSE)
+
+compare_models <- df_profiles2 %>% filter(school_type == "elementary") %>% 
+  select(all_of(profile_constucts2))  %>% 
+ estimate_profiles(n_profiles = 1:6, models = c(1:6), package = "Mplus")
+
+#saveRDS(compare_models, file = here("Output","compare_models_elem.rds"))
+# load object for further analysis / plots
+compare_models <- readRDS(here("Output","compare_models_elem.rds"))
+
+fit <- compare_solutions(compare_models)
+
+fit$fits 
+
+fit$fits %>% ggplot(aes(y = BIC, x = as.factor(Classes), group = as.factor(Model), colour = as.factor(Model))) + geom_point() + geom_line()
+
+
+m1 <- df_profiles2 %>% 
+  filter(school_type == "elementary") %>% 
+  select(all_of(profile_constucts2))  %>% 
+ estimate_profiles(n_profiles = 5, models = 1, package = "MPlus")
+#saveRDS(m1, file = here("Output","final_model_elem.rds"))
+m1 <- readRDS(here("Output","final_model_elem.rds"))
+
+plot_profiles(m1)
+
+prof_elem_plot <-  m1$model_1_class_5$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(x = Parameter, y = Estimate, group = as.factor(Class), colour = as.factor(Class), ymin = Estimate - 1.96*se, ymax = Estimate + 1.96*se)) + geom_point() + geom_line() + geom_linerange() + 
+  ylab("Score") + xlab("Variable") + scale_color_discrete(name = "Profile", breaks = c("5","4","3","2","1")) + 
+  scale_x_discrete(labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School")) + theme(text = element_text(size = 16), axis.text.x = element_text(angle = 45, hjust = 1))
+
+#ggsave(here("Output","prof_elem_plot.pdf") ,plot = prof_elem_plot, width = 8, height = 6, dpi = 300)
+
+# alternative plot ####
+class.labels <- as_labeller(c('1' = "1: The Struggling Motivated", '2' = "2: The Moderately Motivated", '3' = "3: The Steadily Motivated", '4' = "4: The Mastery-Focused", '5' = "5: The Highly Motivated"))
+
+prof_elem_plot_by_profile <- m1$model_1_class_5$estimates %>% filter(Category == "Means") %>% ggplot(aes(x = Parameter, y = Estimate)) + 
+  geom_col(aes(fill = Parameter)) +
+  facet_wrap( ~ Class, nrow = 1, scales = 'free_x', labeller = class.labels) + 
+  scale_x_discrete(labels = c("","","","","")) +
+  scale_y_continuous(limits = c(0,5)) +
+  xlab("") +
+  ylab("Score") +
+    scale_fill_viridis_d(name = "Construct", labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School Climate")) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) 
+
+ggsave(here("Output","prof_elem_plot_by_profile.pdf"), plot = prof_elem_plot_by_profile , width = 8, height = 6, dpi = 300)
+
+#scaled version
+
+prof_elem_plot_by_profile_scale <- m1$model_1_class_5$dff %>% select(all_of(c("Class", profile_constucts2))) %>% mutate(across(all_of(profile_constucts2), scale)) %>% pivot_longer(-Class, names_to = "construct", values_to = "score") %>% group_by(Class, construct) %>% 
+  summarise(mean = mean(score)) %>% ggplot(aes(x = construct, y = mean)) + 
+  geom_col(aes(fill = construct)) +
+  xlab("") +
+  ylab("Score (Standardized)") +
+  scale_fill_viridis_d(name = "Construct", labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School Climate")) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  facet_wrap( ~ Class, nrow = 1, scales = 'free_x', labeller = class.labels)
+
+ggsave(here("Output","prof_elem_plot_by_profile_scale.pdf"), plot = prof_elem_plot_by_profile_scale , width = 12, height = 6, dpi = 300)
+  
+
+df_profiles2_elem %>% select(Class, Test, like_E2, DHEAS, Gender)
+
+
+
+
+table(m1$model_1_class_5$dff$Class)
+
+df_profiles2_elem <- cbind(df_profiles2 %>% filter(school_type == "elementary"), m1$model_1_class_5$dff$Class)
+df_profiles2_elem$class <- df_profiles2_elem$`m1$model_1_class_5$dff$Class`
+
+student_twice_elem <- df_profiles2_elem[duplicated(df_profiles2_elem$ID) == T,"ID"]
+
+student_twice %in% student_twice_elem
+
+df_profiles2_elem %>% ggplot(aes(y=as.factor(`m1$model_1_class_5$dff$Class`), fill = as.factor(Gender))) + geom_bar() + facet_wrap(.~as.factor(druze)) + ggtitle("Elementary")
+
+
+
+df_profiles2_elem %>% ggplot(aes(x=as.factor(`m1$model_1_class_5$dff$Class`), y = like_E2)) + geom_point() + geom_boxplot() + ggtitle("Elementary")
+
+df_prof_elem_change <- df_profiles2_elem[df_profiles2_elem$ID %in% student_twice_elem,]
+df_prof_elem_change$class <- df_prof_elem_change$`m1$model_1_class_5$dff$Class`
+
+df_prof_elem_change %>% select(ID, class, time, Gender) %>% filter(!ID == "Y201") %>% 
+  ggplot(aes(x = time, stratum = as.factor(class), alluvium = ID, fill = as.factor(class), label = class)) + scale_fill_discrete(name = "Profile") +
+  geom_flow() + geom_stratum() + facet_wrap(.~Gender) + ggtitle("Middle school") 
+
+
+
+
+test_prof_elem <- df_profiles2_elem %>% group_by(Gender, class) %>% summarize(mean = mean(Test), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("Testosterone in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "test_by_profile_elem.pdf"), plot = test_prof_elem, device = "pdf", width = 8, height = 5 )
+
+dheas_prof_elem <- df_profiles2_elem %>% group_by(Gender, class) %>% summarize(mean = mean(DHEAS), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("DHEAS in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "dheas_by_profile_elem.pdf"), plot = dheas_prof_elem, device = "pdf", width = 8, height = 5 )
+
+estro_prof_elem <- df_profiles2_elem %>% group_by(Gender, class) %>% summarize(mean = mean(like_E2), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("Estrogen in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "estro_by_profile_elem.pdf"), plot = estro_prof_elem, device = "pdf", width = 8, height = 5 )
+
+
+test_prof_elem_violin <- df_profiles2_elem %>%  
+  ggplot(aes(y = Test, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("Testosterone in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "test_by_profile_elem_violin.pdf"), plot = test_prof_elem_violin, device = "pdf", width = 8, height = 5 )
+
+dheas_prof_elem_violin <- df_profiles2_elem %>%  
+  ggplot(aes(y = DHEAS, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("DHEAS in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "dheas_by_profile_elem_violin.pdf"), plot = dheas_prof_elem_violin, device = "pdf", width = 8, height = 5 )
+
+estro_prof_elem_violin <- df_profiles2_elem %>%  
+  ggplot(aes(y = like_E2, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("Estrogen in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "estro_by_profile_elem_violin.pdf"), plot = estro_prof_elem_violin, device = "pdf", width = 8, height = 5 )
+
+
+```
+
+# effect of covariates
+```{r}
+# Defined functions ----
+
+
+# remove leading zeros, e.g., -0.41 -> -.41
+numformat <- function(val) { sub('^(-)?0[.]', "\\1.", val) }
+
+
+# extract multinomial logistic regresion coefficients (R3STEP)
+# source: https://groups.google.com/g/mplusautomation/c/KfWK09uAky4?pli=1 (visited 13.04.2022)
+
+parse_predictors <- function(x){
+  x <- x %>%
+    str_replace('^[\\s]+', '') %>%
+    str_replace('[\\s]+$', '') %>%
+    str_split('[\\s]+') %>%
+    unlist()
+  if(length(x) < 5){
+    x <- c(x, rep('', times = 5 - length(x)))
+  }
+  tibble(colnames = c('predictor', 'estimate', 'se', 'tval', 'pval'),
+         value = x) %>%
+    spread(colnames, value) %>%
+    select(predictor, estimate, se, tval, pval)
+}
+
+
+extract_r3step <- function(model_path){
+  tibble(x = read_lines(model_path)) %>%
+    mutate(row1 = (1:n())[str_detect(x, 'TESTS OF CATEGORICAL LATENT VARIABLE MULTINOMIAL LOGISTIC REGRESSIONS USING')],
+           row2 = (1:n())[str_detect(x, 'ODDS RATIOS')]) %>%
+    slice((.$row1[1] + 2):(.$row2[1] - 1)) %>%
+    mutate(type_comparison = str_detect(x, 'Parameterization using Reference'),
+           type_colname = str_detect(x, 'Estimate'),
+           type_classnum = str_detect(x, 'C#[0-9]+'),
+           type_predictor = str_detect(x, '[\\.\\-0-9]+[\\s]+[\\.\\-0-9]+')) %>%
+    mutate(class = ifelse(type_classnum, parse_number(x), NA),
+           predictors = ifelse(type_predictor, map(x, parse_predictors), list()),
+           comparison_group = cumsum(type_comparison)) %>%
+    group_by(comparison_group) %>%
+    mutate(class_group = cumsum(type_classnum)) %>%
+    ungroup() %>%
+    mutate(comparison_group = ifelse(comparison_group == 0, max(class, na.rm = TRUE), comparison_group)) %>%
+    group_by(comparison_group, class_group) %>%
+    filter(class_group != 0) %>%
+    mutate(class_group2 = class[!is.na(class)]) %>%
+    ungroup() %>%
+    filter(type_predictor) %>%
+    select(comparison_group, class_group2, predictors) %>%
+    unnest() %>%
+    rename(comparison_class = comparison_group,
+           class = class_group2) %>%
+    mutate(estimate = as.numeric(estimate),
+           se = as.numeric(se),
+           tval = as.numeric(tval),
+           pval = as.numeric(pval)) 
+}
+
+mlr_results <- function(path){
+  res <- extract_r3step(path)
+  res$OR <- exp(res$estimate) #odds ratio berechnen
+  res[,c("estimate","se", "OR")] <- lapply(res[,c("estimate","se", "OR")],function(x) format(round( x, 2),nsmall = 2))
+  stars <- symnum(round(res$pval,2), cutpoints = c(0, 0.001, 0.01, 0.05, 1), 
+                  symbols = c("***","**","*",""))
+  res$estimate <- paste0(res$estimate, stars)
+  res[, c("pval", "tval")] <- NULL
+  names(res) <- c("reference profile", "profile", "covariate", "B","SE", "OR")
+  return(res)
+}
+
+
+create_vis_dat <- function(mplus_lpa_mod){
+  dat <- mplus_lpa_mod$parameters$unstandardized
+  dat <- dat[dat$paramHeader=="Means" & dat$param %in% strsplit(mplus_lpa_mod$input$variable$usevariables, split=" ", fixed=T)[[1]], ]
+  names(dat) <- c("Category","Parameter","Estimate","se","est_se","p","Class")
+  dat$Parameter <- factor(dat$Parameter, levels = strsplit(mplus_lpa_mod$input$variable$usevariables, split=" ", fixed=T)[[1]])
+  return(dat)
+}
+
+
+
+mlr_elem <- mlr_results(here("LPA_latent_reg.out"))
+library(writexl)
+write_xlsx(mlr_elem, here("Output","mlr_elem.xlsx"))
+
+
+mlr_ms <- mlr_results(here("LPA_latent_reg_ms.out"))
+
+write_xlsx(mlr_ms, here("Output","mlr_ms.xlsx"))
+
+```
+
+
+#Profiles for all students, middle school only.
+```{r}
+#Profiles for all students, middle school only.
+
+profile_constucts2 <- c("ma_pers", "ma_peers", "ma_sc", "ma_par",
+                        "per_pers", "per_peers", "per_sc", "per_par")
+
+df_profiles2 <- df_ana[complete.cases(df_ana[,profile_constucts2]),]
+
+compare_models_ms <- df_profiles2 %>% filter(!school_type == "elementary") %>% 
+  select(all_of(profile_constucts2))  %>% 
+ estimate_profiles(n_profiles = 1:6, models = c(1,2,3,4,5,6), package = "Mplus")
+
+#saveRDS(compare_models_ms, file = here("Output","compare_models_ms.rds"))
+# load object for further analysis / plots
+compare_models_ms <- readRDS(here("Output","compare_models_ms.rds"))
+
+fit_ms <- compare_solutions(compare_models_ms)
+
+fit_ms$fits
+
+fit_ms$fits %>% ggplot(aes(y = BIC, x = as.factor(Classes), group = as.factor(Model), colour = as.factor(Model))) + geom_point() + geom_line()
+
+
+m1_ms <- df_profiles2 %>% 
+  filter(!school_type == "elementary") %>% 
+  select(all_of(profile_constucts2))  %>% 
+ estimate_profiles(n_profiles = 4, models = 1, package = "MPlus")
+
+saveRDS(m1_ms, file = here("Output","final_model_ms.rds"))
+# load object for further analysis / plots
+m1_ms <- readRDS(here("Output","final_model_ms.rds"))
+
+
+m1_ms$model_1_class_4$estimates <- m1_ms$model_1_class_4$estimates %>%  mutate(Class_recode = case_when(
+    Class == "1" ~ "1",
+    Class == "2" ~ "3",
+    Class == "3" ~ "2",
+    Class == "4" ~ "4",
+    TRUE ~ "Other"
+  ))
+
+prof_ms_plot <- m1_ms$model_1_class_4$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(x = Parameter, y = Estimate, group = as.factor(Class_recode), colour = as.factor(Class_recode), ymin = Estimate - 1.96*se, ymax = Estimate + 1.96*se)) + geom_point() + geom_line() + geom_linerange() +
+  ylab("Score") + xlab("Variable") + scale_color_discrete(name = "Profile", breaks = c("4","3","2","1")) + 
+  scale_x_discrete(labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School Climate")) + theme(text = element_text(size = 16), axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave(here("Output","prof_ms_plot.pdf") ,plot = prof_ms_plot, width = 8, height = 6, dpi = 300)
+
+
+
+# alternative plot ####
+class.labels_ms <- as_labeller(c('1' = "1: The Disengaged Learner", '2' = "2: The Middle-Ground Engager", '3' = "3: The Mastery-Focused", '4' = "4: The All-Round Excellence"))
+
+prof_ms_plot_by_profile <- m1_ms$model_1_class_4$estimates %>% filter(Category == "Means") %>% ggplot(aes(x = Parameter, y = Estimate)) +
+  geom_col(aes(fill = Parameter)) +
+  facet_wrap( ~ Class, nrow = 1, scales = 'free_x', labeller = class.labels_ms) + 
+  scale_x_discrete(labels = c("","","","","")) +
+  scale_y_continuous(limits = c(0,5)) +
+  xlab("") +
+  ylab("Score") +
+    scale_fill_viridis_d(name = "Construct", labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School Climate")) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) 
+
+ggsave(here("Output","prof_ms_plot_by_profile.pdf"), plot = prof_ms_plot_by_profile , width = 12, height = 6, dpi = 300)
+
+#scaled version
+
+prof_ms_plot_by_profile_scale <- m1_ms$model_1_class_4$dff %>% select(all_of(c("Class", profile_constucts2))) %>% mutate(across(all_of(profile_constucts2), scale)) %>% pivot_longer(-Class, names_to = "construct", values_to = "score") %>% group_by(Class, construct) %>% 
+  summarise(mean = mean(score)) %>% ggplot(aes(x = construct, y = mean)) + 
+  geom_col(aes(fill = construct)) +
+  xlab("") +
+  ylab("Score (Standardized)") +
+  scale_fill_viridis_d(name = "Construct", labels = c("Mastery Parents", "Mastery Peers", "Mastery Personal", "Mastery School Climate", "Perf. Approach. Parents", "Perf. Approach. Peers", "Perf. Approach. Personal", "Perf. Approach. School Climate")) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) +
+  facet_wrap( ~ Class, nrow = 1, scales = 'free_x', labeller = class.labels_ms)
+
+ggsave(here("Output","prof_ms_plot_by_profile_scale.pdf"), plot = prof_ms_plot_by_profile_scale , width = 12, height = 6, dpi = 300)
+
+
+table(m1_ms$model_1_class_4$dff$Class)
+
+
+df_profiles2_ms <- cbind(df_profiles2 %>% filter(!school_type == "elementary"), m1_ms$model_1_class_4$dff$Class)
+df_profiles2_ms$class <- df_profiles2_ms$`m1_ms$model_1_class_4$dff$Class`
+
+
+df_profiles2_ms %>% ggplot(aes(y=as.factor(`m1_ms$model_1_class_4$dff$Class`), fill = as.factor(Gender))) + geom_bar() + facet_wrap(.~as.factor(druze))
+
+df_profiles2_ms %>% ggplot(aes(x=as.factor(`m1_ms$model_1_class_4$dff$Class`), y = like_E2)) + 
+  geom_violin() + geom_point()
+
+student_twice <- df_profiles2_ms[duplicated(df_profiles2_ms$ID) == T,"ID"]
+df_prof_ms_change <- df_profiles2_ms[df_profiles2_ms$ID %in% student_twice,]
+df_prof_ms_change$class <- df_prof_ms_change$`m1_ms$model_1_class_4$dff$Class`
+
+df_prof_ms_change %>% select(ID, class, time, Gender) %>%  ggplot(aes(x = time, stratum = as.factor(class), alluvium = ID, fill = as.factor(class), label = class)) + 
+  scale_fill_discrete(name = "Profile") +
+  geom_flow() + geom_stratum() + facet_wrap(.~Gender) + ggtitle("Middle school") 
+
+
+
+test_prof_ms <- df_profiles2_ms %>% group_by(Gender, class) %>% summarize(mean = mean(Test), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("Testosterone in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "test_by_profile_ms.pdf"), plot = test_prof_ms, device = "pdf", width = 8, height = 5 )
+
+dheas_prof_ms <- df_profiles2_ms %>% group_by(Gender, class) %>% summarize(mean = mean(DHEAS), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("DHEAS in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "dheas_by_profile_ms.pdf"), plot = dheas_prof_ms, device = "pdf", width = 8, height = 5 )
+
+estro_prof_ms <- df_profiles2_ms %>% group_by(Gender, class) %>% summarize(mean = mean(like_E2), sd = sd(Test)) %>% 
+  ggplot(aes(y = mean, x = class, ymin = mean - sd, ymax = mean+sd, colour = Gender)) + geom_point(position = position_dodge(width = 0.2)) + geom_line(position = position_dodge(width = 0.2)) + geom_linerange(position = position_dodge(width = 0.2)) + ylab("Estrogen in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "estro_by_profile_ms.pdf"), plot = estro_prof_ms, device = "pdf", width = 8, height = 5 )
+
+
+test_prof_ms_violin <- df_profiles2_ms %>%  
+  ggplot(aes(y = Test, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("Testosterone in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "test_by_profile_ms_violin.pdf"), plot = test_prof_ms_violin, device = "pdf", width = 8, height = 5 )
+
+dheas_prof_ms_violin <- df_profiles2_ms %>%  
+  ggplot(aes(y = DHEAS, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("DHEAS in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16))
+
+ggsave(here("Output", "Final Plots", "dheas_by_profile_ms_violin.pdf"), plot = dheas_prof_ms_violin, device = "pdf", width = 8, height = 5 )
+
+estro_prof_ms_violin <- df_profiles2_ms %>%  
+  ggplot(aes(y = like_E2, x = as.factor(class))) + geom_violin(scale = "count") + geom_jitter() +
+  facet_wrap(.~Gender) + ylab("Estrogen in pg/ml") + xlab("Motivational Profile") + theme(text = element_text(size = 16)) 
+
+ggsave(here("Output", "Final Plots", "estro_by_profile_ms_violin.pdf"), plot = estro_prof_ms_violin, device = "pdf", width = 8, height = 5 )
+
+
+
+```
+
+Cluster Motivational constructs, seperate analysis for Jewish vs. Druze kids
+Druze kids, elementary
+```{r}
+
+motivation <- c("mastery_peers", "mastery_pers", "mastery_sc", "mastery_parents",
+                "performance_peers", "performance_pers", "perf_sc", "perf_parents", "Test_log", "DHEAS_log", "like_E2_log")
+
+profile_constucts <- c("mastery_diff_sc", "mastery_diff_parents", "mastery_diff_peer", 
+                        "perf_diff_sc", "perf_diff_parents", "perf_diff_peer",
+                        "Test_log", "DHEAS_log", "like_E2_log")
+
+df_profiles <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,]
+
+df_profiles_druze_elem <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,] %>% filter(druze == 0)
+df_profiles_druze_elem_s <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,] %>% filter(druze == 0) %>% 
+select(all_of(profile_constucts)) %>% scale() %>% as.data.frame()
+
+
+
+# hyperparamter search
+set.seed(42)
+
+prob <- c()
+
+for(n in seq(from = 5, to = 20, by = 1)){
+  proj <- df_profiles_druze_elem %>% select(all_of(profile_constucts)) %>% scale()  %>% umap(n_neighbors = n)
+for(i in 2:30){
+    hclust <-  proj$layout %>% hdbscan(minPts = i)
+    prob$prob <- append(prob$prob, mean(hclust$membership_prob))
+    prob$minPts <- append(prob$minPts, i)
+    prob$n_neighbors <- append(prob$n_neighbors,n)
+  }
+}
+
+# plot search results
+data.frame(prob) %>% ggplot(aes(y = prob, x = minPts, colour = as.factor(n_neighbors))) + 
+  geom_line()
+
+# find best combination
+data.frame(prob)[which.max(data.frame(prob)$prob),] 
+
+# fit final model
+proj.final <- df_profiles %>% filter(druze == 0) %>% select(all_of(profile_constucts))%>% umap(n_neighbors = 10)
+hclust.final <- proj.final$layout %>%  hdbscan(minPts = 29)
+hclust.final
+
+plot(hclust.final, show_flat = T)
+
+plot(hclust.final)
+
+
+# build data set for plotting and analysis
+df.clust <- cbind(df_profiles_druze_elem, hclust.final$cluster)
+df.clust <- cbind(df.clust, unlist(proj.final$layout))
+df.clust <- df.clust %>% rename(cluster = 'hclust.final$cluster', dim1 = '1', dim2 = '2')
+
+# plot solution
+df.clust %>% ggplot(aes(y= dim2, x = dim1, color = as.factor(cluster), shape = as.factor(df_profiles_druze_elem$Gender))) +
+  geom_point()
+
+# plot clusters
+df.clust %>% select(all_of(profile_constucts) | cluster ) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  ggplot(aes(x = score, y = construct)) + geom_boxplot() + geom_jitter()  + facet_wrap(.~cluster, ncol = 1) +
+  theme(text = element_text(size = 15))
+
+df.clust %>% select(all_of(profile_constucts) | cluster ) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  group_by(cluster, construct) %>% 
+  summarize(mean = mean(score, na.rm = T)) %>% 
+  ggplot(aes(y = mean, x = construct, group = as.factor(cluster), color = as.factor(cluster))) +  geom_point()  + geom_line() +
+  theme(text = element_text(size = 15))
+
+```
+
+Cluster Motivational constructs, seperate analysis for Jewish vs. Druze kids
+Druze kids, middle school
+```{r}
+
+motivation <- c("mastery_peers", "mastery_pers", "mastery_sc", "mastery_parents",
+                "performance_peers", "performance_pers", "perf_sc", "perf_parents", "Test_log", "DHEAS_log", "like_E2_log")
+
+profile_constucts <- c("ma_peers","ma_pers","ma_sc","ma_par",
+                       "per_peers","per_pers","per_sc","per_par",
+                        "Test_log", "DHEAS_log", "like_E2_log")
+
+df_profiles <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,]
+
+df_profiles_druze_ms <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,] %>% filter(druze == 1, !school_type == "elementary")
+df_profiles_druze_ms_s <- df[complete.cases(df[,profile_constucts]) & df$Test_log > 0,] %>% filter(druze == 1, !school_type == "elementary") %>% 
+select(all_of(profile_constucts)) %>% scale() %>% as.data.frame()
+
+
+
+# hyperparamter search
+set.seed(42)
+
+prob <- c()
+
+for(n in seq(from = 5, to = 20, by = 1)){
+  proj <- df_profiles_druze_ms %>% select(all_of(profile_constucts)) %>% scale()  %>% umap(n_neighbors = n)
+for(i in 2:30){
+    hclust <-  proj$layout %>% hdbscan(minPts = i)
+    prob$prob <- append(prob$prob, mean(hclust$membership_prob))
+    prob$minPts <- append(prob$minPts, i)
+    prob$n_neighbors <- append(prob$n_neighbors,n)
+  }
+}
+
+# plot search results
+data.frame(prob) %>% ggplot(aes(y = prob, x = minPts, colour = as.factor(n_neighbors))) + 
+  geom_line()
+
+# find best combination
+data.frame(prob)[which.max(data.frame(prob)$prob),] 
+
+# fit final model
+proj.final <- df_profiles_druze_ms %>% select(all_of(profile_constucts))%>% umap(n_neighbors = 9)
+hclust.final <- proj.final$layout %>%  hdbscan(minPts = 17)
+hclust.final
+
+plot(hclust.final, show_flat = T)
+
+plot(hclust.final)
+
+
+# build data set for plotting and analysis
+df.clust <- cbind(df_profiles_druze_ms, hclust.final$cluster)
+df.clust <- cbind(df.clust, unlist(proj.final$layout))
+df.clust <- df.clust %>% rename(cluster = 'hclust.final$cluster', dim1 = '1', dim2 = '2')
+
+# plot solution
+df.clust %>% ggplot(aes(y= dim2, x = dim1, color = as.factor(cluster), shape = as.factor(df_profiles_druze_ms$Gender))) +
+  geom_point()
+
+# plot clusters
+df.clust %>% select(all_of(profile_constucts) | cluster ) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  ggplot(aes(x = score, y = construct)) + geom_boxplot() + facet_wrap(.~cluster, ncol = 1) +
+  theme(text = element_text(size = 15))
+
+df.clust %>% select(all_of(profile_constucts) | cluster ) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  group_by(cluster, construct) %>% 
+  summarize(mean = mean(score, na.rm = T)) %>% 
+  ggplot(aes(y = mean, x = construct, group = as.factor(cluster), color = as.factor(cluster))) +  geom_point()  + geom_line() +
+  theme(text = element_text(size = 15))
+```
+
+
+
+
+Cluster Motivational constructs, seperate analysis for Jewish vs. Druze kids
+Jewish kids, elementary
+```{r}
+
+motivation <- c("mastery_peers", "mastery_pers", "mastery_sc", "mastery_parents",
+                "performance_peers", "performance_pers", "perf_sc", "perf_parents")
+
+# hyperparamter search
+set.seed(42)
+
+prob <- c()
+
+for(n in seq(from = 3, to = 20, by = 3)){
+  proj <- df %>% filter(druze == 0, school_type == "elementary") %>% select(all_of(motivation)) %>% umap(n_neighbors = n)
+for(i in 2:20){
+    hclust <-  proj$layout %>% hdbscan(minPts = i)
+    prob$prob <- append(prob$prob, mean(hclust$membership_prob))
+    prob$minPts <- append(prob$minPts, i)
+    prob$n_neighbors <- append(prob$n_neighbors,n)
+  }
+}
+
+#df %>% filter(druze == 0) %>% select(all_of(motivation)) %>% ggpairs()
+
+# plot search results
+data.frame(prob) %>% ggplot(aes(y = prob, x = minPts, colour = as.factor(n_neighbors))) + 
+  geom_line()
+
+# find best combination
+data.frame(prob)[which.max(data.frame(prob)$prob),] 
+
+# fit final model
+proj.final <- df %>% filter(druze == 0, school_type == "elementary") %>% select(all_of(motivation))%>% umap(n_neighbors = 3)
+hclust.final <- proj.final$layout %>% hdbscan(minPts = 6)
+hclust.final
+
+plot(hclust.final, show_flat = T)
+
+plot(hclust.final)
+
+
+# build data set for plotting and analysis
+df.clust <- cbind(df %>% filter(druze == 0, school_type == "elementary"), hclust.final$cluster)
+df.clust <- cbind(df.clust, unlist(proj.final$layout))
+df.clust <- df.clust %>% rename(cluster = 'hclust.final$cluster', dim1 = '1', dim2 = '2')
+
+# plot solution
+df.clust %>% ggplot(aes(y= dim2, x = dim1, color = as.factor(cluster), shape = as.factor(school_type))) +
+  geom_point()
+
+# plot clusters
+df.clust %>% select(all_of(motivation) | cluster) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  ggplot(aes(x = score, y = construct)) + geom_violin() + facet_wrap(.~cluster, ncol = 1) +
+  theme(text = element_text(size = 15))
+
+
+```
+
+Cluster Motivational constructs, seperate analysis for Jewish vs. Druze kids
+Jewish kids, middle school
+```{r}
+
+motivation <- c("mastery_peers", "mastery_pers", "mastery_sc", "mastery_parents",
+                "performance_peers", "performance_pers", "perf_sc", "perf_parents")
+
+# hyperparamter search
+set.seed(42)
+
+prob <- c()
+
+for(n in seq(from = 3, to = 30, by = 3)){
+  proj <- df %>% filter(druze == 0, school_type == "middle School") %>% select(all_of(motivation)) %>% umap(n_neighbors = n)
+for(i in 2:20){
+    hclust <-  proj$layout %>% hdbscan(minPts = i)
+    prob$prob <- append(prob$prob, mean(hclust$membership_prob))
+    prob$minPts <- append(prob$minPts, i)
+    prob$n_neighbors <- append(prob$n_neighbors,n)
+  }
+}
+
+#df %>% filter(druze == 0) %>% select(all_of(motivation)) %>% ggpairs()
+
+# plot search results
+data.frame(prob) %>% ggplot(aes(y = prob, x = minPts, colour = as.factor(n_neighbors))) + 
+  geom_line()
+
+# find best combination
+data.frame(prob)[which.max(data.frame(prob)$prob),] 
+
+# fit final model
+proj.final <- df %>% filter(druze == 0, school_type == "middle School") %>% select(all_of(motivation))%>% umap(n_neighbors = 3)
+hclust.final <- proj.final$layout %>% hdbscan(minPts = 14)
+hclust.final
+
+plot(hclust.final, show_flat = T)
+
+plot(hclust.final)
+
+
+# build data set for plotting and analysis
+df.clust <- cbind(df %>% filter(druze == 0, school_type == "middle school"), hclust.final$cluster)
+df.clust <- cbind(df.clust, unlist(proj.final$layout))
+df.clust <- df.clust %>% rename(cluster = 'hclust.final$cluster', dim1 = '1', dim2 = '2')
+
+# plot solution
+df.clust %>% ggplot(aes(y= dim2, x = dim1, color = as.factor(cluster), shape = as.factor(school_type))) +
+  geom_point()
+
+# plot clusters
+df.clust %>% select(all_of(motivation) | cluster) %>% 
+  pivot_longer(!cluster, values_to = "score", names_to = "construct") %>% 
+  ggplot(aes(x = score, y = construct)) + geom_boxplot() + facet_wrap(.~cluster, ncol = 1) +
+  theme(text = element_text(size = 15))
+
+
+```
+
+
+hormones clustering, use log values 
+```{r}
+# hyperparamter search
+set.seed(42)
+
+prob <- c()
+
+df_horm <- df[complete.cases(df[,c("Test_log", "like_E2_log", "DHEAS_log")]),]
+df_horm[df_horm == -Inf] <- 0
+
+
+for(n in seq(from = 3, to = 30, by = 3)){
+  proj <- df_horm %>% select("Test_log", "like_E2_log", "DHEAS_log") %>% umap(n_neighbors = n)
+for(i in 2:50){
+    hclust <-  proj$layout %>% hdbscan(minPts = i)
+    prob$prob <- append(prob$prob, mean(hclust$membership_prob))
+    prob$minPts <- append(prob$minPts, i)
+    prob$n_neighbors <- append(prob$n_neighbors,n)
+  }
+}
+
+
+
+# plot search results
+data.frame(prob) %>% ggplot(aes(y = prob, x = minPts, colour = as.factor(n_neighbors))) + 
+  geom_line()
+
+# find best combination
+data.frame(prob)[which.max(data.frame(prob)$prob),] 
+
+
+proj.final <- df_horm %>%    select("Test_log", "like_E2_log", "DHEAS_log")%>% umap(n_neighbors = 6)
+hclust.final <- proj.final$layout %>% hdbscan(minPts = 10)
+hclust.final
+
+plot(hclust.final, show_flat = T)
+
+plot(hclust.final)
+
+
+# build data set for plotting and analysis
+df.clust <- cbind(df_horm , hclust.final$cluster)
+df.clust <- cbind(df.clust, unlist(proj.final$layout))
+df.clust <- df.clust %>% rename(cluster = 'hclust.final$cluster', dim1 = '1', dim2 = '2')
+df.clust.horm <- df.clust 
+df.clust.horm$cluster_horm <- df.clust.horm$cluster 
+# plot solution
+df.clust %>% ggplot(aes(y= dim2, x = dim1, color = as.factor(cluster), shape = as.factor(school_type))) +
+  geom_point()
+
+# plot clusters
+df.clust %>% select("Test_log", "like_E2_log", "DHEAS_log", cluster, druze) %>% filter(cluster != 0) %>% 
+  pivot_longer(!c(cluster, druze), values_to = "score", names_to = "construct") %>% group_by(construct,cluster) %>% 
+  summarize(mean = mean(score)) %>% 
+  ggplot(aes(y = mean, x = construct, group = cluster, colour = as.factor(cluster))) + geom_point() + geom_line() +
+  theme(text = element_text(size = 15))
+
+
+df.clust.comb <- inner_join(df.clust, df.clust.horm[df.clust.horm$time == 1 & df.clust.horm$druze == 1, c("ID","cluster_horm")], by = "ID")
+
+table(df.clust.comb[,c("cluster", "cluster_horm")])
+
+```
+
+
+
+
+
+# Plot
+```{r}
+df %>% filter(DHEAS < 1000, druze == 0) %>% select(school_type, DHEAS, contains("diff"), Gender) %>% 
+  pivot_longer(cols = contains("diff"), values_to = "delta", names_to = "diff_type") %>% 
+  ggplot(aes(y = delta, x = DHEAS, colour = Gender)) + 
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(diff_type ~ school_type)
+
+df %>% filter(Test < 1000, druze == 0) %>% select(school_type, Test, contains("diff"), Gender) %>% 
+  pivot_longer(cols = contains("diff"), values_to = "delta", names_to = "diff_type") %>% 
+  ggplot(aes(y = delta, x = Test, colour = Gender)) + 
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(diff_type ~ school_type)
+
+df %>% filter(like_E2 < 50, druze == 0) %>% select(school_type, like_E2, contains("diff"), Gender) %>% 
+  pivot_longer(cols = contains("diff"), values_to = "delta", names_to = "diff_type") %>% 
+  ggplot(aes(y = delta, x = like_E2, colour = Gender)) + 
+  geom_point() +
+  geom_smooth(method = "lm") +
+  facet_wrap(diff_type ~ school_type)
+```
+
+
+```{r}
+df %>% filter(Test < 150 & school_type == "elementary" & druze == 0)  %>% ggplot(aes(y = mastery_diff, x = Test)) + geom_point() +  geom_smooth(method = "lm") 
+
+df %>% filter(Test < 150 & school_type == "elementary" & druze == 0)  %>% ggplot(aes(y = perfA_diff, x = Test)) + geom_point() +  geom_smooth(method = "lm") 
+
+df %>% filter(Test < 150 & school_type == "elementary" & druze == 0)  %>% ggplot(aes(y = perf_diff, x = Test)) + geom_point() +  geom_smooth(method = "lm") 
+
+####
+df %>%  filter(Test < 1500, druze == 0)  %>%  ggplot(aes(y = mastery_diff, x = Test)) + geom_point() +   geom_smooth(method = "lm") + facet_wrap(Gender ~ school_type)
+
+df %>% filter(Test < 150 & druze == 0 & school_type == "elementary") %>% 
+  lm(mastery_diff ~ Test, data = .) %>%  summary()
+
+df %>%  filter(Test < 1500, druze == 0)  %>%  ggplot(aes(y = perfA_diff, x = Test)) + geom_point() +   geom_smooth(method = "lm") + facet_wrap(Gender ~ school_type)
+
+df %>% filter(Test < 150 & druze == 0 & school_type == "elementary") %>% 
+  lm(perfA_diff ~ Test, data = .) %>%  summary()
+
+df %>%  filter(Test < 1500, druze == 0)  %>%  ggplot(aes(y = perf_diff, x = Test)) + geom_point() +   geom_smooth(method = "lm") + facet_wrap(Gender ~ school_type)
+
+df %>% filter(Test < 150 & druze == 0 & school_type == "elementary") %>% 
+  lm(perf_diff ~ Test, data = .) %>%  summary()
+
+####
+df %>% filter(Test < 1500)  %>% ggplot(aes(y = perf_diff, x = Test, colour = as.factor(druze))) + geom_point() +   geom_smooth(method = "lm") + facet_wrap(Gender ~ school_type)
+
+df %>% filter(Test < 150)  %>% ggplot(aes(y = perfA_diff, x = Test, colour = as.factor(druze))) + geom_point() +   geom_smooth(method = "lm") + facet_wrap(Gender ~ school_type)
+
+#df$Test_log_levels <- ifelse(df$Test_log <= quantile(df$Test_log, na.rm = T)[2], 1,
+ #                            ifelse(df$Test_log <= quantile(df$Test_log, na.rm = T)[3], 2 ,
+ #                                   ifelse(df$Test_log <= quantile(df$Test_log, na.rm = T)[4], 3, 4)))
+#
+
+
+table(df[,c("Gender","school_type","druze")])
+
+df %>% filter(Test < 150 & druze == 0 & school_type == "elementary") %>% 
+  lm(mastery_diff ~ Test, data = .) %>%  summary()
+
+```
+
+
+#### lower testosterone should show a lower correlation between their personal affect and their perceptions of their peers
+
+
+```{r}
+
+df_boys_ms <- df %>% filter(Gender == "boy")
+df_boys_ms$Test_log_levels <- ifelse(df_boys_ms$Test_log <= quantile(df_boys_ms$Test_log, na.rm = T)[2], 1,
+                             ifelse(df_boys_ms$Test_log <= quantile(df_boys_ms$Test_log, na.rm = T)[3], 2 ,
+                                    ifelse(df_boys_ms$Test_log <= quantile(df_boys_ms$Test_log, na.rm = T)[4], 3, 4)))
+
+df_boys_ms %>% ggplot(aes(y = mastery_peers, x = mastery_pers)) + geom_point() + geom_smooth(method = "lm") + facet_wrap(.~as.factor(Test_log_levels))
+
+df_boys_ms %>% ggplot(aes(y = performance_peers, x = performance_pers)) + geom_point() + geom_smooth(method = "lm") + facet_wrap(.~as.factor(Test_log_levels))
+
+df_boys_ms %>% ggplot(aes(y = perf_av_peers, x = perfA_pers)) + geom_point() + geom_smooth(method = "lm") + facet_wrap(.~as.factor(Test_log_levels))
+
+
+df_boys_ms %>% lm(mastery_peers ~ mastery_pers*Test_log, data = .) %>% summary()
+df_boys_ms %>% lm(performance_peers ~ performance_pers*Test_log, data = .) %>% summary()
+df_boys_ms %>% lm(`PePA1-R` ~ `PPA1-R`*Test_log, data = .) %>% summary()
+
+```
+
+#### LPA
+Using all data, best model has 2 classes. Using only boys, vest model has two classes. Using only boys and elementary, best model has two classes. Using only boys and middle school, best model has three classes. 
+Continue with that last model for now. 
+```{r}
+
+lpa_models <- df %>% filter(Gender == "boy" & Test_log < 6) %>% select(se, mastery_pers, perf_pers, perfA_pers, ma_peers, pa_peers, perf_av_peers) %>% 
+  estimate_profiles(n = 1:5, models = c(1,2,3,4,5,6), package = "MplusAutomation")
+
+lpa_models <- df %>% filter(Gender == "boy" & Test_log < 6) %>% select(se, mastery_pers, perf_pers, perfA_pers) %>% 
+  estimate_profiles(n = 1:5, models = c(1,2,3,4,5,6), package = "MplusAutomation")
+
+compare_solutions(lpa_models)
+
+lpa_models
+ 
+get_estimates(lpa_models$model_4_class_2) %>% filter(Category == "Means") %>%
+  ggplot(aes(y = Estimate, x = Parameter, colour = as.factor(Class), group = as.factor(Class), ymin = Estimate - 1.96 * se, ymax = Estimate + 1.96 * se)) + 
+  geom_pointrange() + geom_line()
+
+df_lpa <- df %>% filter(Gender == "boy" & Test_log < 6)
+df_lpa$class <- as.character(lpa_models$model_4_class_3$dff$Class)
+
+
+df_lpa %>% ggplot(aes(y = Test_log, x = class)) + geom_boxplot()
+
+```
+
+
+#### Classify groups usign decison tree
+```{r}
+library(tidymodels)
+
+df_lpa_ml <- df_lpa %>% select(class, Test_log, ma_peers, pa_peers, perf_av_peers) %>% filter(!is.na(Test_log) & Test_log < 6)
+
+split <- initial_split(df_lpa_ml) 
+df_train <- training(split)
+df_test  <- testing(split)
+
+# set up cross validation
+cv <- vfold_cv(df_train, v = 10) 
+
+# recipe
+learn_rec <- df_train  %>% 
+  recipe(class ~ . ) 
+
+# model types
+model_tree <- decision_tree(min_n = tune(), tree_depth = tune(), cost_complexity = tune()) %>%
+  set_mode("classification") %>%
+  set_engine("rpart")
+
+# workflow
+learn_wf <- 
+  workflow() %>% 
+  add_recipe(learn_rec) %>% 
+  add_model(model_tree)
+
+library(doParallel)
+doParallel::registerDoParallel(cores = detectCores())
+
+tune_res <- tune_grid(
+  learn_wf,
+  resamples = cv,
+  grid = 100, metrics = metric_set(accuracy)
+)
+
+autoplot(tune_res)
+
+
+best_acc <- select_best(tune_res, "accuracy")
+
+learn_wf_final <- finalize_workflow(learn_wf, best_acc)
+
+
+# fit model
+learn_wf_fit <- fit(learn_wf_final, df_train) 
+
+#use model for prediction
+learn_pred <- predict(learn_wf_fit, df_test)
+
+learn_pred <- bind_cols(learn_pred, df_test %>% select(class))
+
+learn_pred$class <- as.factor(learn_pred$class)
+
+accuracy(learn_pred, truth = class, estimate = .pred_class)
+
+
+tree_fit_rpart <- extract_fit_engine(learn_wf_fit)
+rpart.plot(tree_fit_rpart)
+
+summary(tree_fit_rpart)
+
+learn_wf_fit %>% vip()
+```
+
+
+```{r}
+library(xgboost)
+
+model_boost <- boost_tree(
+  mode = "classification",
+  trees = 1000,
+  min_n = tune(),
+  tree_depth = tune(),
+  learn_rate = tune(),
+  loss_reduction = tune()
+) %>%
+  set_engine("xgboost")
+
+learn_wf_boost <- 
+  workflow() %>% 
+  add_recipe(learn_rec) %>% 
+  add_model(model_boost)
+
+tune_res_boost <- tune_grid(
+  learn_wf_boost,
+  resamples = cv,
+  grid = 100, metrics = metric_set(accuracy)
+)
+
+tune_res_boost %>% autoplot()
+
+best_acc <- select_best(tune_res_boost, "accuracy")
+
+learn_wf_final <- finalize_workflow(learn_wf_boost, best_acc)
+
+
+# fit model
+learn_wf_fit <- fit(learn_wf_final, df_train) 
+
+#use model for prediction
+learn_pred <- predict(learn_wf_fit, df_test)
+
+learn_pred <- bind_cols(learn_pred, df_test %>% select(class))
+
+accuracy(learn_pred, truth = class, estimate = .pred_class)
+
+
+library(DALEXtra)
+eval_learn <- explain_tidymodels(learn_wf_fit, 
+                                 data = df_train, 
+                                 y = df_train$class,
+                                 label = "random forest",
+                                 verbose = F
+)
+
+model_parts(eval_learn) %>% plot()
+
+model_profile(eval_learn, N = NULL) %>% plot()
+
+```
+
+
+
+
+#### Hormones outlier detection
+```{r}
+
+df %>% ggplot(aes(x = Test)) + geom_histogram()
+df %>% ggplot(aes(x = E2)) + geom_histogram()
+df %>% ggplot(aes(x = DHEAS)) + geom_histogram()
+df %>% ggplot(aes(x = like_E2)) + geom_histogram()
+
+
+# kids with DHEAS above 6000
+DHEAS_6000 <- df %>% filter(DHEAS > 6000) %>% select(ID)
+Like_E2_2_5 <- df %>% filter(like_E2 > 2.5) %>% select(ID)
+
+outliers <- DHEAS_6000[DHEAS_6000$ID %in% Like_E2_2_5$ID, "ID"]
+
+
+E2_age_outliers <- df %>% filter(like_E2 > 2.5) %>% 
+  ggplot(aes(y =  like_E2, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","E2_like_age_outliers.pdf"), plot = E2_age_outliers ) 
+
+df_E2_outliers
+
+```
+
+#### remove data with hormone outliers
+```{r}
+df_ana <- df %>% filter(DHEAS < 5000, E2 < 5, like_E2 < 12.5, Test < 200)
+
+#check
+df_ana %>%  summarise(DHEAS = max(DHEAS, na.rm = T),
+                      E2 = max(E2, na.rm = T),
+                      like_E2 = max(like_E2, na.rm = T),
+                      Test = max(Test, na.rm = T))
+
+```
+
+
+
+### Reproduce analyses from David
+#### Personal Mastery Orientation and Testosterone
+Calculate Cronbach's alpha as a measure of reliability for each time point and overall
+```{r}
+df_ana %>% filter(time == 1, Gender == "boy") %>% select(all_of(personal_mastery)) %>% alpha() # time 1
+df_ana %>% filter(time == 2, Gender == "girl") %>% select(all_of(personal_mastery)) %>% alpha() # time 2
+df_ana %>% select(all_of(personal_mastery)) %>% alpha() # overall
+
+```
+It seems like the reliability of the test depends on gender and time point, reliability much better at T1 and really bad for boys at T2...
+
+
+#### Hormones over time
+```{r}
+test_age <- df %>% filter(Test < 250) %>% 
+  ggplot(aes(y =  Test, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","test_age.pdf"), plot = test_age)
+
+test_age_unfiltered <- df  %>% 
+  ggplot(aes(y =  Test, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","test_age_unfiltered.pdf"), plot = test_age_unfiltered) 
+
+dheas_age <- df %>% filter(DHEAS < 12500) %>% 
+  ggplot(aes(y =  DHEAS, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","dheas_age.pdf"), plot = dheas_age)
+
+dheas_age_E2 <- df %>% filter(DHEAS < 6000) %>% 
+  ggplot(aes(y =  DHEAS, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) + facet_wrap("E2_binary") 
+ggsave(here("Output","dheas_age_E2_6000.pdf"), plot = dheas_age_E2)
+
+dheas_age_unfiltered <- df %>% 
+  ggplot(aes(y =  DHEAS, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","dheas_age_unfiltered.pdf"), plot = dheas_age_unfiltered ) 
+
+
+df %>% 
+  ggplot(aes(y =  E2_binary, x = age, color = as.factor(Gender))) + geom_point() + geom_smooth(aes(group =as.factor(Gender))) 
+
+df %>% group_by(E2_binary) %>% summarize(age = mean(age))
+
+
+E2_age_unfiltered <- df  %>% 
+  ggplot(aes(y =  like_E2, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group =Gender)) 
+ggsave(here("Output","E2_like_age_unfiltered.pdf"), plot = E2_age_unfiltered ) 
+
+E2_age <- df %>% filter(like_E2 < 2.5) %>% 
+  ggplot(aes(y =  like_E2, x = age, color = Gender)) + geom_point() + geom_smooth(method = "lm", aes(group = Gender)) 
+ggsave(here("Output","E2_like_age_2_5.pdf"), plot = E2_age ) 
+
+df$age_year <- round(df$age, digits = 0)
+
+like_E2_SD <- df %>% filter(Gender == "girl", like_E2 < 2.5) %>% 
+  group_by(age_year) %>% 
+  summarise(sd_E2 = sd(like_E2, na.rm = T),
+            mean_E2 = mean(like_E2, na.rm = T)) %>% 
+  ggplot(aes(y = sd_E2, x = age_year)) + geom_point() +
+  ylab("Age") + xlab("Like E2 Standard Deviation") + ggtitle("Like E2 Standard Deviation for Girls")
+ 
+ggsave(here("Output","like_E2_SD.pdf"), plot = like_E2_SD ) 
+```
+
+##### Use linear regression to investigate relation between mastery orientation and testosterone level. First calculate scale average.
+```{r}
+df_ana$pMap  <- df_ana %>% select(all_of(personal_mastery)) %>% rowMeans(., na.rm = T)
+df$pMap  <- df %>% select(all_of(personal_mastery)) %>% rowMeans(., na.rm = T)
+
+map_test_plot <- df  %>% filter(Test < 1000) %>%  ggplot(aes(x = Test, y = pMap)) + geom_point() + geom_smooth(method = "lm") + facet_wrap(as.factor(Gender)~as.factor(school))
+
+#ggsave(here("Output","map_test_plot.pdf"), map_test_plot)
+
+```
+#### Self_efficacy and DHEAS
+
+Calculate Cronbach's alpha as a measure of reliability for each time point and overall
+```{r}
+df_ana %>% filter(time == 1) %>% select(all_of(self_efficacy)) %>% alpha() # time 1
+df_ana %>% filter(time == 2) %>% select(all_of(self_efficacy)) %>% alpha() # time 2
+df_ana %>% select(all_of(self_efficacy)) %>% alpha() # overall
+
+```
+```{r}
+df_ana$SE  <- df_ana %>% select(all_of(self_efficacy)) %>% rowMeans(., na.rm = T)
+
+df_ana_pre <- df_ana %>% filter(time == 1) 
+df_ana_post <- df_ana %>% filter(time == 2)
+
+df_ana_pp <- left_join(df_ana_pre[,c("ID","DHEAS","SE","pMap","Gender","Test", "value_me_sciences", "E2_binary","interest_sciences","value_me_math","value_me_languge","value_me_english")], df_ana_post[,c("ID","DHEAS","pMap","SE","Test","value_me_sciences","interest_sciences","value_me_math","value_me_languge","value_me_english")], by = "ID")
+
+df_ana_pp$SEgain <- df_ana_pp$SE.y - df_ana_pp$SE.x
+df_ana_pp$DHEASgain <- df_ana_pp$DHEAS.y - df_ana_pp$DHEAS.x
+df_ana_pp$Testgain <- df_ana_pp$Test.y - df_ana_pp$Test.x
+df_ana_pp$pMapgain <- df_ana_pp$pMap.y - df_ana_pp$pMap.x
+
+df_ana_pp$value_me_sciences_gain <- df_ana_pp$value_me_sciences.y - df_ana_pp$value_me_sciences.x
+df_ana_pp$value_me_math_gain <- df_ana_pp$value_me_math.y - df_ana_pp$value_me_math.x
+df_ana_pp$value_me_english_gain <- df_ana_pp$value_me_english.y - df_ana_pp$value_me_english.x
+df_ana_pp$value_me_languge_gain <- df_ana_pp$value_me_languge.y - df_ana_pp$value_me_languge.x
+
+df_ana_pp$interest_sciences_gain <- df_ana_pp$interest_sciences.y - df_ana_pp$interest_sciences.x
+
+SEgain_DHEASgain_plot <- df_ana_pp %>% ggplot(aes(y = SEgain, x = DHEASgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = SEgain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = value_me_sciences_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = value_me_sciences_gain, x = DHEASgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+
+df_ana_pp %>% ggplot(aes(y = value_me_math_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = value_me_languge_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = value_me_english_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_pp %>% ggplot(aes(y = interest_sciences_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+
+
+df_ana_pp %>% ggplot(aes(y = value_me_sciences_gain, x = DHEASgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+#ggsave(here("Output","SEgain_DHEASgain.pdf"),SEgain_DHEASgain_plot)
+
+df_ana_pp %>%  lm(SEgain ~ DHEASgain*as.factor(Gender), data = .) %>%  summary()
+
+df_ana_pp %>%  lm(value_me_sciences_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_pp %>%  lm(value_me_languge_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_pp %>%  lm(value_me_math_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_pp %>%  lm(value_me_english_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_pp %>%  lm(interest_sciences_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+
+```
+```{r}
+df_ana_TD <-df_ana <- df %>% filter(Test < 200)
+
+df_ana_TD$SE  <- df_ana_TD %>% select(all_of(self_efficacy)) %>% rowMeans(., na.rm = T)
+
+df_ana_TD_pre <- df_ana_TD %>% filter(time == 1) 
+df_ana_TD_post <- df_ana_TD %>% filter(time == 2)
+
+df_ana_TD_pp <- left_join(df_ana_TD_pre[,c("ID","DHEAS","SE","pMap","Gender","Test", "value_me_sciences", "E2_binary","interest_sciences","value_me_math","value_me_languge","value_me_english")], df_ana_TD_post[,c("ID","DHEAS","pMap","SE","Test","value_me_sciences","interest_sciences","value_me_math","value_me_languge","value_me_english")], by = "ID")
+
+
+
+df_ana_TD_pp$SEgain <- df_ana_TD_pp$SE.y - df_ana_TD_pp$SE.x
+df_ana_TD_pp$DHEASgain <- df_ana_TD_pp$DHEAS.y - df_ana_TD_pp$DHEAS.x
+df_ana_TD_pp$Testgain <- df_ana_TD_pp$Test.y - df_ana_TD_pp$Test.x
+df_ana_TD_pp$pMapgain <- df_ana_TD_pp$pMap.y - df_ana_TD_pp$pMap.x
+
+df_ana_TD_pp$value_me_sciences_gain <- df_ana_TD_pp$value_me_sciences.y - df_ana_TD_pp$value_me_sciences.x
+df_ana_TD_pp$value_me_math_gain <- df_ana_TD_pp$value_me_math.y - df_ana_TD_pp$value_me_math.x
+df_ana_TD_pp$value_me_english_gain <- df_ana_TD_pp$value_me_english.y - df_ana_TD_pp$value_me_english.x
+df_ana_TD_pp$value_me_languge_gain <- df_ana_TD_pp$value_me_languge.y - df_ana_TD_pp$value_me_languge.x
+
+df_ana_TD_pp$interest_sciences_gain <- df_ana_TD_pp$interest_sciences.y - df_ana_TD_pp$interest_sciences.x
+
+df_ana_TD_pp <- df_ana_TD_pp[complete.cases(df_ana_TD_pp),c(colnames(df_ana_TD_pp)[grep("gain",colnames(df_ana_TD_pp))],"Gender")]
+
+df_ana_TD_pp %>% ggplot(aes(y = SEgain, x = DHEASgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = SEgain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = value_me_sciences_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = value_me_sciences_gain, x = DHEASgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+
+df_ana_TD_pp %>% ggplot(aes(y = value_me_math_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = value_me_languge_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = value_me_english_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+df_ana_TD_pp %>% ggplot(aes(y = interest_sciences_gain, x = Testgain)) + geom_point() + geom_smooth(method = "lm") + facet_grid(vars(Gender))
+
+
+#ggsave(here("Output","SEgain_DHEASgain.pdf"),SEgain_DHEASgain_plot)
+
+df_ana_TD_pp %>%  lm(SEgain ~ DHEASgain*as.factor(Gender), data = .) %>%  summary()
+
+df_ana_TD_pp %>%  lm(value_me_sciences_gain ~ Testgain*as.factor(Gender), data = .) %>%  summary()
+df_ana_TD_pp %>%  lm(value_me_languge_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_TD_pp %>%  lm(value_me_math_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+df_ana_TD_pp %>%  lm(value_me_english_gain ~ Testgain:as.factor(Gender)formula = peers_performance_avoidance, data = .) %>%  summary()
+df_ana_TD_pp %>%  lm(interest_sciences_gain ~ Testgain:as.factor(Gender), data = .) %>%  summary()
+
+```
+
+
+
+#### Hormones 
+Profile analysis, create new df and scale some variables
+```{r}
+df_prof <- df_ana 
+
+df_prof$Test_s <-  as.numeric(scale(df_prof$Test))
+df_prof$DHEAS_s <-  as.numeric(scale(df_prof$DHEAS))
+df_prof$like_E2_s <-  scale(df_prof$like_E2)
+
+
+df_prof %>% ggplot(aes(y = Test_s, x = DHEAS_s, colour = like_E2_s)) + geom_point() 
+```
+
+MClust analysis
+```{r}
+BIC <-  df_prof %>% select(Test_s,DHEAS_s,like_E2_s) %>% mclustBIC()
+
+plot(BIC)
+summary(BIC)
+
+mod1 <- df_prof %>% select(Test_s,DHEAS_s,like_E2_s) %>% Mclust(.,x = BIC) 
+summary(mod1, parameters = T)
+
+plot(mod1, what = "classification")
+```
+
+
+```{r}
+# tidy lpa ####
+# using E2 like
+
+compare_models <- df_prof %>% 
+  select(Test,DHEAS,like_E2) %>% 
+  single_imputation() %>% 
+  scale() %>% 
+  estimate_profiles(n_profiles = 1:10, models = 1:6, package = "mplus")
+
+
+fit <- compare_solutions(compare_models)
+
+fit$fits %>% ggplot(aes(y = BIC, x = as.factor(Classes), group = as.factor(Model), colour = as.factor(Model))) + geom_point() + geom_line()
+
+
+get_fit(compare_models) %>% filter(Model == 2)
+
+mod_best <- df_prof %>% 
+  select(Test,DHEAS,like_E2) %>% 
+  single_imputation() %>% 
+  scale() %>% 
+  estimate_profiles(n_profiles = 4, models = 2, package = "mplus")
+
+mod_best_df <- get_data(mod_best)
+
+profiles_test_dheas_like_e2 <- mod_best$model_2_class_4$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(y = Estimate, x = Parameter, ymax = Estimate+1.96*se, ymin = Estimate-1.96*se, group = as.factor(Class), colour = as.factor(Class) )) + geom_pointrange() + geom_line()
+
+#ggsave(here("Output","profiles_test_dheas_like_e2.pdf"),profiles_test_dheas_like_e2)
+
+df_ana_mod <- cbind(df_ana,get_data(mod_best)$Class)
+colnames(df_ana_mod)[87] <- "class"
+
+table(df_ana_mod$class,df_ana_mod$Gender)
+
+df_ana_mod %>% select(class, DHEAS, Test, like_E2) %>% pivot_longer(cols = c("DHEAS", "Test", "like_E2"), values_to = "value", names_to = "hormone") %>% group_by(class, hormone) %>% summarise(mean = mean(value), ci = ci(value)) %>% 
+  ggplot(aes(y = mean, x = as.factor(hormone), group = as.factor(class), colour = as.factor(class), ymin = mean-ci, ymax = mean+ci)) +
+  geom_pointrange() + geom_line()
+
+
+summary(aov(SE ~ as.factor(class), data = df_ana_mod))
+```
+
+
+```{r}
+###### include E2 as binary
+
+compare_models_E2 <- df_prof %>% 
+  select(Test_s,DHEAS_s,E2_binary) %>% 
+  single_imputation() %>% 
+  estimate_profiles(n_profiles = 1:10, models = 1:6, package = "mplus")
+
+compare_solutions(compare_models_E2)
+
+get_fit(compare_models_E2) %>% ggplot(aes(y = BIC, x = as.factor(Classes), group = as.factor(Model), colour = as.factor(Model))) + geom_point() + geom_line()
+
+get_fit(compare_models_E2)
+
+mod_best_E2_bin <- df_prof %>% 
+  select(Test_s,DHEAS_s,E2_binary) %>% 
+  single_imputation() %>% 
+  estimate_profiles(n_profiles = 2, models = 2, package = "mplus")
+
+mod_best_E2_bin_df <- get_data(mod_best_E2_bin)
+df_ana_mod2 <- cbind(df_ana,get_data(mod_best_E2_bin)$Class)
+colnames(df_ana_mod2)[87] <- "class"
+
+table(df_ana_mod2$class,df_ana_mod2$Gender)
+
+profiles_test_dheas_like_e2_binary <- mod_best_E2_bin$model_2_class_2$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(y = Estimate, x = Parameter, ymax = Estimate+1.96*se, ymin = Estimate-1.96*se, group = as.factor(Class), colour = as.factor(Class) )) + geom_pointrange() + geom_line()
+
+#ggsave(here("Output","profiles_test_dheas_like_e2_binary.pdf"),profiles_test_dheas_like_e2_binary)
+
+
+
+df_ana_mod2 %>% ggplot(aes(y = pMap, x = as.factor(class))) + geom_boxplot()
+
+summary(aov(interest_sciences ~ as.factor(class)+as.factor(Gender), data = df_ana_mod2))
+summary(aov(SE ~ as.factor(class)+as.factor(Gender), data = df_ana_mod2))
+```
+
+
+```{r}
+#### use only Test and DHEAS
+
+compare_models_test_dh <- df_prof %>% 
+  select(Test_s,DHEAS_s) %>% 
+  single_imputation() %>% 
+  estimate_profiles(n_profiles = 1:10, models = 1:6, package = "mplus")
+
+compare_solutions(compare_models_test_dh)
+
+get_fit(compare_models_test_dh) %>% filter(Model == 2)
+
+
+mod_best_test_dh_3 <- df_prof %>% 
+  select(Test_s,DHEAS_s) %>% 
+  single_imputation() %>% 
+  estimate_profiles(n_profiles = 3, models = 2, package = "mplus")
+
+mod_best_test_dh_4 <- df_prof %>% 
+  select(Test_s,DHEAS_s) %>% 
+  single_imputation() %>% 
+  estimate_profiles(n_profiles = 4, models = 2, package = "mplus")
+
+
+
+profiles_test_dheas_3 <-  mod_best_test_dh_3$model_2_class_3$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(y = Estimate, x = Parameter, ymax = Estimate+1.96*se, ymin = Estimate-1.96*se, group = as.factor(Class), colour = as.factor(Class) )) + geom_pointrange() + geom_line()
+
+
+profiles_test_dheas_4  <- mod_best_test_dh_4$model_2_class_4$estimates %>% filter(Category == "Means") %>% 
+  ggplot(aes(y = Estimate, x = Parameter, ymax = Estimate+1.96*se, ymin = Estimate-1.96*se, group = as.factor(Class), colour = as.factor(Class) )) + geom_pointrange() + geom_line()
+
+#ggsave(here("Output","profiles_test_dheas_4.pdf"),profiles_test_dheas_4)
+#ggsave(here("Output","profiles_test_dheas_3.pdf"),profiles_test_dheas_3)
+
+
+
+
+df_ana_mod3 <- cbind(df_ana,get_data(mod_best_test_dh_4)$Class)
+colnames(df_ana_mod3)[87] <- "class"
+
+df_ana_mod3_3 <- cbind(df_ana,get_data(mod_best_test_dh_3)$Class)
+colnames(df_ana_mod3_3)[87] <- "class"
+
+table(df_ana_mod3$class,df_ana_mod3$Gender)
+
+df_ana_mod3 %>% ggplot(aes(y = interest_sciences, x = as.factor(class))) + geom_boxplot()
+
+summary(aov(SE ~ as.factor(class)  + as.factor(Gender), data = df_ana_mod3_3))
+summary(aov(value_me_sciences ~ as.factor(class)  + as.factor(Gender), data = df_ana_mod3))
+
+```
+

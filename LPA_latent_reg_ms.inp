@@ -1,0 +1,35 @@
+TITLE: LPA with latent regression MS
+
+DATA: 
+	FILE IS /Users/marcus/IPN/Hormones/Analysis/MPlus_latent_regression/df_prof_ms_E2.dat;
+	
+VARIABLE:
+  NAMES = ma_pers ma_peers ma_sc ma_par
+            per_pers per_peers per_sc per_par
+            Gender Test DHEAS E2 E2_bin;
+  MISSING ARE all (-999);
+  USEVARIABLES ARE ma_pers ma_peers ma_sc ma_par per_pers per_peers per_sc per_par;
+
+  AUXILIARY = (R3STEP) E2_bin;
+  CLASSES = c(4);
+  
+  
+ ANALYSIS:
+  TYPE IS MIXTURE;
+  ESTIMATOR IS MLR;
+  !STARTS = 12000, 2000;
+  MITERATIONS = 1500;  !number of iterations for the EM algorithm
+  OPTSEED = 876314;
+  PROCESSORS = 4;
+
+ 
+ MODEL:
+  %c#1%
+    ma_pers ma_peers ma_sc ma_par per_pers per_peers per_sc per_par(Var1-Var8)
+  %c#2%
+    ma_pers ma_peers ma_sc ma_par per_pers per_peers per_sc per_par(Var1-Var8)
+  %c#3%
+    ma_pers ma_peers ma_sc ma_par per_pers per_peers per_sc per_par(Var1-Var8)
+  %c#4%
+    ma_pers ma_peers ma_sc ma_par per_pers per_peers per_sc per_par(Var1-Var8)
+ 
